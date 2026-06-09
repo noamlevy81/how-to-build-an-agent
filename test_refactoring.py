@@ -37,20 +37,20 @@ try:
     # Add user message
     conversation_history.append({
         "role": "user",
-        "parts": ["Hello"]
+        "content": "Hello"
     })
     print(f"✓ Added user message: {len(conversation_history)} messages")
     
     # Add model response
     conversation_history.append({
-        "role": "model", 
-        "parts": ["Hello! How can I help?"]
+        "role": "assistant",
+        "content": "Hello! How can I help?"
     })
     print(f"✓ Added model response: {len(conversation_history)} messages")
     
     # Verify structure
     assert conversation_history[0]["role"] == "user"
-    assert conversation_history[1]["role"] == "model"
+    assert conversation_history[1]["role"] == "assistant"
     print("✓ Conversation history structure correct")
     print()
 except Exception as e:
@@ -68,7 +68,7 @@ try:
     sig = inspect.signature(agent.process_function_calls)
     params = list(sig.parameters.keys())
     
-    expected = ['response', 'model', 'registry', 'conversation_history', 'tools']
+    expected = ['response', 'client', 'registry', 'conversation_history', 'tools', 'model']
     assert params == expected, f"Expected {expected}, got {params}"
     print(f"✓ process_function_calls has correct signature: {params}")
     
@@ -85,15 +85,16 @@ print("Test 4: Tool Registry Integration")
 print("-" * 40)
 
 try:
-    # Get tools in Gemini format
-    tools = registry.to_gemini_tools()
-    print(f"✓ Generated {len(tools)} tool definitions for Gemini")
+    # Get tools in OpenAI/Azure format
+    tools = registry.to_openai_tools()
+    print(f"✓ Generated {len(tools)} tool definitions for Azure AI Inference")
     
     # Verify structure
     assert isinstance(tools, list)
     assert len(tools) == 15
-    assert all('name' in t for t in tools)
-    assert all('description' in t for t in tools)
+    assert all(t["type"] == "function" for t in tools)
+    assert all("name" in t["function"] for t in tools)
+    assert all("description" in t["function"] for t in tools)
     print("✓ Tool definitions have correct structure")
     print()
 except Exception as e:

@@ -1,21 +1,32 @@
 #!/usr/bin/env python3
 """Python Coding Agent - An AI assistant for software development tasks.
 
-This agent uses Google Gemini API and provides 16 tools for file operations,
+This agent uses the Azure AI Inference SDK (azure-ai-inference), which talks to
+both Azure OpenAI deployments and Azure AI Foundry models through the same
+Chat Completions messages-array API. It provides 16 tools for file operations,
 code search, execution, git integration, and interactive features.
 
 Usage:
     uv run agent.py
 
-Set GOOGLE_API_KEY environment variable before running.
+Configuration (environment variables):
+    AZURE_INFERENCE_ENDPOINT  Endpoint URL. Examples:
+        Azure OpenAI:  https://<resource>.openai.azure.com/openai/deployments/<deployment>
+        Azure Foundry: https://<resource>.services.ai.azure.com/models
+    AZURE_INFERENCE_MODEL     Model / deployment name (required for Foundry,
+                              optional for Azure OpenAI per-deployment endpoints).
+    AZURE_INFERENCE_KEY       API key. If unset, Entra ID (DefaultAzureCredential)
+                              is used instead.
+    AZURE_INFERENCE_API_VERSION  Optional API version (defaults to a recent one).
 """
 
+import json
 import os
 import sys
-from collections.abc import Callable
 from typing import Any
 
-import google.generativeai as genai
+from azure.ai.inference import ChatCompletionsClient
+from azure.core.credentials import AzureKeyCredential
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -30,25 +41,50 @@ from tools.interactive import ask_user, remember
 
 console = Console()
 
+DEFAULT_API_VERSION = "2024-10-21"
 
-def setup_gemini_client() -> genai.GenerativeModel:
-    """Initialize Gemini API client.
-    
+
+def setup_client() -> tuple[ChatCompletionsClient, str | None]:
+    """Initialize the Azure AI Inference chat completions client.
+
+    Works for both Azure OpenAI and Azure AI Foundry endpoints; only the
+    configuration (endpoint, model, credential) differs between them.
+
     Returns:
-        Configured GenerativeModel instance
-        
+        A tuple of (client, model_name). model_name may be None when the
+        endpoint already targets a specific deployment.
+
     Raises:
-        ValueError: If GOOGLE_API_KEY not set
+        ValueError: If AZURE_INFERENCE_ENDPOINT is not set.
     """
-    api_key = os.environ.get("GOOGLE_API_KEY")
-    if not api_key:
+    endpoint = os.environ.get("AZURE_INFERENCE_ENDPOINT")
+    if not endpoint:
         raise ValueError(
-            "GOOGLE_API_KEY environment variable not set.\n"
-            "Get your API key from: https://aistudio.google.com/apikey"
+            "AZURE_INFERENCE_ENDPOINT environment variable not set.\n"
+            "Set it to your Azure OpenAI or Azure AI Foundry endpoint, e.g.\n"
+            "  https://<resource>.openai.azure.com/openai/deployments/<deployment>\n"
+            "  https://<resource>.services.ai.azure.com/models"
         )
-    
-    genai.configure(api_key=api_key)
-    return genai.GenerativeModel("gemini-2.0-flash")
+
+    model = os.environ.get("AZURE_INFERENCE_MODEL")
+    api_version = os.environ.get("AZURE_INFERENCE_API_VERSION", DEFAULT_API_VERSION)
+
+    api_key = os.environ.get("AZURE_INFERENCE_KEY")
+    credential: Any
+    if api_key:
+        credential = AzureKeyCredential(api_key)
+    else:
+        # Fall back to Entra ID (managed identity / az login / env credentials).
+        from azure.identity import DefaultAzureCredential
+
+        credential = DefaultAzureCredential()
+
+    client = ChatCompletionsClient(
+        endpoint=endpoint,
+        credential=credential,
+        api_version=api_version,
+    )
+    return client, model
 
 
 def initialize_tools() -> ToolRegistry:
@@ -459,76 +495,83 @@ def initialize_tools() -> ToolRegistry:
 
 def process_function_calls(
     response: Any,
-    model: Any,
+    client: ChatCompletionsClient,
     registry: ToolRegistry,
     conversation_history: list[dict[str, Any]],
-    tools: list[dict[str, Any]]
+    tools: list[Any],
+    model: str | None,
 ) -> Any | None:
-    """Process function calls from Gemini response.
-    
+    """Process tool calls from a chat completion response.
+
     Args:
-        response: Response from Gemini
-        model: GenerativeModel instance
+        response: Response from the chat completions client
+        client: ChatCompletionsClient instance
         registry: Tool registry
         conversation_history: Complete conversation so far (modified in place)
-        tools: Tool definitions for Gemini
-        
+        tools: Tool definitions in OpenAI/Azure format
+        model: Model / deployment name (or None)
+
     Returns:
-        Next response after executing tools, or None if no function calls
+        Next response after executing tools, or None if no tool calls
     """
-    function_calls = []
-    
-    for part in response.parts:
-        if fn_call := part.function_call:
-            function_calls.append(fn_call)
-    
-    if not function_calls:
+    message = response.choices[0].message
+    tool_calls = message.tool_calls or []
+
+    if not tool_calls:
         return None
-    
-    function_responses = []
-    for fn_call in function_calls:
-        console.print(f"[cyan]🔧 Executing: {fn_call.name}[/cyan]")
-        
-        args = dict(fn_call.args)
-        
-        result = registry.execute(fn_call.name, **args)
-        
-        function_responses.append(
-            genai.protos.Part(
-                function_response=genai.protos.FunctionResponse(
-                    name=fn_call.name,
-                    response={"result": result}
-                )
-            )
-        )
-    
+
+    # Append the assistant turn that requested the tool calls.
     conversation_history.append({
-        "role": "model",
-        "parts": response.parts
+        "role": "assistant",
+        "content": message.content or "",
+        "tool_calls": [
+            {
+                "id": tc.id,
+                "type": "function",
+                "function": {
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments,
+                },
+            }
+            for tc in tool_calls
+        ],
     })
-    
-    conversation_history.append({
-        "role": "user", 
-        "parts": function_responses
-    })
-    
+
+    # Execute each tool and append its result as a 'tool' message.
+    for tc in tool_calls:
+        console.print(f"[cyan]🔧 Executing: {tc.function.name}[/cyan]")
+
+        try:
+            args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+        except json.JSONDecodeError:
+            args = {}
+
+        result = registry.execute(tc.function.name, **args)
+
+        conversation_history.append({
+            "role": "tool",
+            "tool_call_id": tc.id,
+            "content": result,
+        })
+
     console.print(f"[dim]📤 Sending context: {len(conversation_history)} messages[/dim]")
-    return model.generate_content(
-        conversation_history,
-        tools=tools
+    return client.complete(
+        messages=conversation_history,
+        tools=tools,
+        model=model,
     )
 
 
 def run_agent_loop() -> None:
     """Main agent event loop.
-    
+
     Flow:
     1. User provides input
-    2. Send ENTIRE conversation history + new message to Gemini with available tools
-    3. Process any function calls (sending full history again with results)
+    2. Send ENTIRE conversation history + new message to the model with tools
+    3. Process any tool calls (sending full history again with results)
     4. Display response
     5. Repeat
-    
+
     KEY INSIGHT: Each API call is stateless. We explicitly manage and send
     the complete conversation history with every request. This makes the
     context window growth visible.
@@ -542,7 +585,7 @@ def run_agent_loop() -> None:
     
     # Initialize
     try:
-        model = setup_gemini_client()
+        client, model = setup_client()
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
         sys.exit(1)
@@ -550,9 +593,10 @@ def run_agent_loop() -> None:
     registry = initialize_tools()
     
     # Prepare tools for API
+    tools: list[Any]
     if registry.tools:
-        tools = registry.to_gemini_tools()
-        console.print(f"[green]✓ Loaded {len(tools[0].function_declarations)} tools[/green]\n")
+        tools = registry.to_openai_tools()
+        console.print(f"[green]✓ Loaded {len(tools)} tools[/green]\n")
     else:
         tools = []
         console.print("[yellow]⚠ No tools loaded yet (Phase 1 only)[/yellow]\n")
@@ -572,40 +616,40 @@ def run_agent_loop() -> None:
             
             conversation_history.append({
                 "role": "user",
-                "parts": [user_input]
+                "content": user_input
             })
             
             console.print(f"[cyan]🤔 Thinking...[/cyan] [dim](context: {len(conversation_history)} messages)[/dim]")
             
-            if tools:
-                response = model.generate_content(
-                    conversation_history,
-                    tools=tools
-                )
-            else:
-                response = model.generate_content(conversation_history)
+            response: Any = client.complete(
+                messages=conversation_history,
+                tools=tools,
+                model=model,
+            )
             
-            while response.parts and any(part.function_call for part in response.parts):
+            while response.choices[0].message.tool_calls:
                 response = process_function_calls(
-                    response, 
-                    model, 
-                    registry, 
+                    response,
+                    client,
+                    registry,
                     conversation_history,
-                    tools
+                    tools,
+                    model,
                 )
                 if response is None:
                     break
             
-            if response and response.parts:
+            if response:
+                final_message = response.choices[0].message
                 conversation_history.append({
-                    "role": "model",
-                    "parts": response.parts
+                    "role": "assistant",
+                    "content": final_message.content or "",
                 })
-            
-            if response and response.text:
-                console.print("\n[bold blue]Agent:[/bold blue]")
-                console.print(Markdown(response.text))
-                console.print()
+
+                if final_message.content:
+                    console.print("\n[bold blue]Agent:[/bold blue]")
+                    console.print(Markdown(final_message.content))
+                    console.print()
             
         except KeyboardInterrupt:
             console.print("\n[yellow]Use 'exit' to quit[/yellow]")

@@ -3,57 +3,6 @@
 from collections.abc import Callable
 from typing import Any
 from pydantic import BaseModel
-import google.generativeai as genai
-
-
-def _convert_to_gemini_schema(schema: dict[str, Any]) -> genai.protos.Schema:
-    """Convert OpenAI-style JSON Schema to Gemini protobuf Schema.
-    
-    Args:
-        schema: OpenAI-style JSON Schema dict
-        
-    Returns:
-        Gemini protobuf Schema object
-    """
-    # Map JSON Schema types to Gemini protobuf types
-    type_map = {
-        "string": genai.protos.Type.STRING,
-        "number": genai.protos.Type.NUMBER,
-        "integer": genai.protos.Type.INTEGER,
-        "boolean": genai.protos.Type.BOOLEAN,
-        "array": genai.protos.Type.ARRAY,
-        "object": genai.protos.Type.OBJECT,
-    }
-    
-    schema_type = schema.get("type", "object")
-    gemini_type = type_map.get(schema_type, genai.protos.Type.STRING)
-    
-    kwargs: dict[str, Any] = {"type": gemini_type}
-    
-    # Add description if present
-    if "description" in schema:
-        kwargs["description"] = schema["description"]
-    
-    # Handle properties for object types
-    if "properties" in schema:
-        kwargs["properties"] = {
-            name: _convert_to_gemini_schema(prop_schema)
-            for name, prop_schema in schema["properties"].items()
-        }
-    
-    # Handle required fields
-    if "required" in schema:
-        kwargs["required"] = schema["required"]
-    
-    # Handle array items
-    if "items" in schema:
-        kwargs["items"] = _convert_to_gemini_schema(schema["items"])
-    
-    # Handle enum values
-    if "enum" in schema:
-        kwargs["enum"] = schema["enum"]
-    
-    return genai.protos.Schema(**kwargs)
 
 
 class ToolDefinition(BaseModel):
@@ -62,7 +11,7 @@ class ToolDefinition(BaseModel):
     Each tool consists of:
     - name: Unique identifier for the tool
     - description: What the tool does (shown to the AI)
-    - parameters: JSON Schema for parameters (Gemini format)
+    - parameters: JSON Schema for parameters (OpenAI tool format)
     - handler: The Python function that executes the tool
     
     Example:
@@ -88,21 +37,25 @@ class ToolDefinition(BaseModel):
     class Config:
         arbitrary_types_allowed = True
     
-    def to_gemini_format(self) -> genai.protos.FunctionDeclaration:
-        """Convert tool definition to Gemini API format.
-        
+    def to_openai_tool(self) -> dict[str, Any]:
+        """Convert tool definition to OpenAI/Azure tool format.
+
         Returns:
-            Gemini FunctionDeclaration protobuf object
-            
+            A tool dict accepted by the azure-ai-inference ``complete`` call
+            (and by Azure OpenAI / OpenAI Chat Completions).
+
         Note:
-            Gemini uses protobuf-based Schema objects, not OpenAI-style
-            JSON Schema dicts. This method handles the conversion.
+            ``parameters`` is already an OpenAI-style JSON Schema dict, so this
+            is essentially a pass-through wrapped in the function envelope.
         """
-        return genai.protos.FunctionDeclaration(
-            name=self.name,
-            description=self.description,
-            parameters=_convert_to_gemini_schema(self.parameters)
-        )
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.parameters,
+            },
+        }
     
     def execute(self, **kwargs: Any) -> str:
         """Execute the tool with given arguments.
@@ -153,16 +106,14 @@ class ToolRegistry:
         """
         return self.tools[name]
     
-    def to_gemini_tools(self) -> list[genai.protos.Tool]:
-        """Convert all registered tools to Gemini format.
-        
+    def to_openai_tools(self) -> list[dict[str, Any]]:
+        """Convert all registered tools to OpenAI/Azure tool format.
+
         Returns:
-            List containing a single Tool with all function declarations
+            List of tool dicts, one per registered tool, ready to pass as the
+            ``tools`` argument to azure-ai-inference / Azure OpenAI / OpenAI.
         """
-        function_declarations = [
-            tool.to_gemini_format() for tool in self.tools.values()
-        ]
-        return [genai.protos.Tool(function_declarations=function_declarations)]
+        return [tool.to_openai_tool() for tool in self.tools.values()]
     
     def execute(self, name: str, **kwargs: Any) -> str:
         """Execute a tool by name.

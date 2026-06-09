@@ -1,11 +1,12 @@
 [project]
 name = "python-coding-agent"
 version = "0.1.0"
-description = "Educational Python AI coding assistant with Google Gemini"
+description = "Educational Python AI coding assistant with Azure AI Inference (Azure OpenAI / Azure AI Foundry)"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "google-generativeai>=0.8.0",
+    "azure-ai-inference>=1.0.0b6",
+    "azure-identity>=1.15.0",
     "pydantic>=2.0.0",
     "pytest>=7.4.0",
     "rich>=13.0.0",
