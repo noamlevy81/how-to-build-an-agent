@@ -23,7 +23,7 @@ An educational AI coding assistant built with the Azure AI Inference SDK. This p
 ```bash
 # Clone the repository
 git clone https://github.com/noamlevy81/how-to-build-an-agent.git
-cd python-agent
+cd how-to-build-an-agent
 
 # Install dependencies using uv
 uv sync
@@ -39,9 +39,25 @@ $env:AZURE_INFERENCE_MODEL='<deployment-or-model-name>'
 $env:AZURE_INFERENCE_KEY='your-api-key-here'
 ```
 
-> The same SDK targets **Azure AI Foundry** too — just point `AZURE_INFERENCE_ENDPOINT`
-> at the Foundry models endpoint (e.g. `https://<resource>.services.ai.azure.com/models`)
-> and set `AZURE_INFERENCE_MODEL` to the model name.
+> The same SDK targets **Azure AI Foundry** too — point `AZURE_INFERENCE_ENDPOINT`
+> at the Foundry models endpoint (e.g. `https://<resource>.services.ai.azure.com/models`,
+> note the `/models` suffix), set `AZURE_INFERENCE_MODEL` to the model/deployment name,
+> and set `AZURE_INFERENCE_API_VERSION='2024-05-01-preview'` (the default
+> `2024-10-21` is Azure OpenAI-only and returns 404 on the Foundry `/models` route).
+>
+> **Keyless (Entra ID) auth:** omit `AZURE_INFERENCE_KEY` to authenticate with
+> `DefaultAzureCredential` instead of an API key — useful when your organization
+> disables local/key authentication. Run `az login` (or use a managed identity /
+> environment credentials) first, and ensure your identity has a data-plane role
+> such as **Azure AI User** / **Cognitive Services User** on the resource.
+>
+> Example (Foundry, keyless):
+> ```bash
+> export AZURE_INFERENCE_ENDPOINT='https://<resource>.services.ai.azure.com/models'
+> export AZURE_INFERENCE_MODEL='<model-or-deployment-name>'
+> export AZURE_INFERENCE_API_VERSION='2024-05-01-preview'
+> # leave AZURE_INFERENCE_KEY unset
+> ```
 
 ### Run the Agent
 

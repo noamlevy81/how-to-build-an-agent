@@ -43,6 +43,10 @@ console = Console()
 
 DEFAULT_API_VERSION = "2024-10-21"
 
+# Entra ID token scope for data-plane access to Azure OpenAI / Foundry
+# (Cognitive Services) endpoints. Only used when falling back to Entra ID.
+COGNITIVE_SERVICES_SCOPE = "https://cognitiveservices.azure.com/.default"
+
 
 def setup_client() -> tuple[ChatCompletionsClient, str | None]:
     """Initialize the Azure AI Inference chat completions client.
@@ -71,6 +75,8 @@ def setup_client() -> tuple[ChatCompletionsClient, str | None]:
 
     api_key = os.environ.get("AZURE_INFERENCE_KEY")
     credential: Any
+    # Extra client kwargs that only apply to the Entra ID (token) path.
+    credential_kwargs: dict[str, Any] = {}
     if api_key:
         credential = AzureKeyCredential(api_key)
     else:
@@ -78,11 +84,15 @@ def setup_client() -> tuple[ChatCompletionsClient, str | None]:
         from azure.identity import DefaultAzureCredential
 
         credential = DefaultAzureCredential()
+        # Token auth needs an explicit data-plane scope; the SDK default scope
+        # does not match Azure OpenAI / Foundry endpoints and yields a 401.
+        credential_kwargs["credential_scopes"] = [COGNITIVE_SERVICES_SCOPE]
 
     client = ChatCompletionsClient(
         endpoint=endpoint,
         credential=credential,
         api_version=api_version,
+        **credential_kwargs,
     )
     return client, model
 
